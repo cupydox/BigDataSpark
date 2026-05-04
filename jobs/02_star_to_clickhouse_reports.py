@@ -1,7 +1,5 @@
-import json
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -12,8 +10,8 @@ POSTGRES_USER = "bigdata"
 POSTGRES_PASSWORD = "bigdata"
 POSTGRES_DRIVER = "org.postgresql.Driver"
 
-CLICKHOUSE_HOST = "clickhouse"
-CLICKHOUSE_PORT = 8123
+CLICKHOUSE_HTTP_HOST = "clickhouse"
+CLICKHOUSE_HTTP_PORT = 8123
 CLICKHOUSE_DATABASE = "bigdata"
 CLICKHOUSE_USER = "bigdata"
 CLICKHOUSE_PASSWORD = "bigdata"
@@ -32,7 +30,7 @@ def read_postgres_table(spark: SparkSession, table_name: str):
     )
 
 
-def clickhouse_url():
+def clickhouse_http_url():
     params = urllib.parse.urlencode(
         {
             "user": CLICKHOUSE_USER,
@@ -40,12 +38,12 @@ def clickhouse_url():
             "database": CLICKHOUSE_DATABASE,
         }
     )
-    return f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/?{params}"
+    return f"http://{CLICKHOUSE_HTTP_HOST}:{CLICKHOUSE_HTTP_PORT}/?{params}"
 
 
 def execute_clickhouse_query(query: str):
     request = urllib.request.Request(
-        clickhouse_url(),
+        clickhouse_http_url(),
         data=query.encode("utf-8"),
         method="POST",
     )
@@ -54,41 +52,60 @@ def execute_clickhouse_query(query: str):
         return response.read().decode("utf-8")
 
 
-def json_serializer(value):
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    return value
-
-
 def recreate_clickhouse_table(table_name: str, ddl: str):
     execute_clickhouse_query(f"DROP TABLE IF EXISTS {table_name}")
     execute_clickhouse_query(ddl)
 
 
-def insert_dataframe_to_clickhouse(df, table_name: str):
-    rows = df.collect()
+def insert_json_partition_to_clickhouse(json_rows_iterator, table_name: str):
+    import urllib.parse
+    import urllib.request
+
+    rows = list(json_rows_iterator)
 
     if not rows:
         return
 
-    json_lines = []
-    for row in rows:
-        json_lines.append(
-            json.dumps(
-                row.asDict(recursive=True),
-                default=json_serializer,
-                ensure_ascii=False,
-            )
-        )
+    params = urllib.parse.urlencode(
+        {
+            "user": CLICKHOUSE_USER,
+            "password": CLICKHOUSE_PASSWORD,
+            "database": CLICKHOUSE_DATABASE,
+        }
+    )
 
-    body = f"INSERT INTO {table_name} FORMAT JSONEachRow\n" + "\n".join(json_lines)
-    execute_clickhouse_query(body)
+    url = f"http://{CLICKHOUSE_HTTP_HOST}:{CLICKHOUSE_HTTP_PORT}/?{params}"
+    query = f"INSERT INTO {table_name} FORMAT JSONEachRow\n" + "\n".join(rows)
+
+    request = urllib.request.Request(
+        url,
+        data=query.encode("utf-8"),
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request) as response:
+        response.read()
+
+
+def write_clickhouse_table_by_spark(df, table_name: str):
+    (
+        df.toJSON()
+        .foreachPartition(
+            lambda partition: insert_json_partition_to_clickhouse(partition, table_name)
+        )
+    )
 
 
 def write_report(df, table_name: str, ddl: str):
+    cached_df = df.cache()
+    rows_count = cached_df.count()
+
     recreate_clickhouse_table(table_name, ddl)
-    insert_dataframe_to_clickhouse(df, table_name)
-    print(f"Report {table_name} has been written to ClickHouse. Rows: {df.count()}")
+    write_clickhouse_table_by_spark(cached_df, table_name)
+
+    cached_df.unpersist()
+
+    print(f"Report {table_name} has been written to ClickHouse by Spark. Rows: {rows_count}")
 
 
 def main():
@@ -235,12 +252,12 @@ def main():
         "report_product_sales",
         """
         CREATE TABLE report_product_sales (
-            product_key UInt64,
+            product_key Int64,
             product_name Nullable(String),
             product_category Nullable(String),
             product_brand Nullable(String),
-            orders_count UInt64,
-            total_quantity_sold UInt64,
+            orders_count Int64,
+            total_quantity_sold Int64,
             total_sales_amount Float64,
             avg_sale_amount Float64
         )
@@ -254,12 +271,12 @@ def main():
         "report_customer_sales",
         """
         CREATE TABLE report_customer_sales (
-            customer_key UInt64,
+            customer_key Int64,
             customer_name Nullable(String),
             customer_email Nullable(String),
             customer_country Nullable(String),
-            orders_count UInt64,
-            total_quantity UInt64,
+            orders_count Int64,
+            total_quantity Int64,
             total_spent Float64,
             avg_check Float64
         )
@@ -273,11 +290,11 @@ def main():
         "report_time_sales",
         """
         CREATE TABLE report_time_sales (
-            year UInt16,
-            quarter UInt8,
-            month UInt8,
-            orders_count UInt64,
-            total_quantity UInt64,
+            year Int32,
+            quarter Int32,
+            month Int32,
+            orders_count Int64,
+            total_quantity Int64,
             total_sales_amount Float64,
             avg_check Float64
         )
@@ -291,12 +308,12 @@ def main():
         "report_store_sales",
         """
         CREATE TABLE report_store_sales (
-            store_key UInt64,
+            store_key Int64,
             store_name Nullable(String),
             store_city Nullable(String),
             store_country Nullable(String),
-            orders_count UInt64,
-            total_quantity UInt64,
+            orders_count Int64,
+            total_quantity Int64,
             total_sales_amount Float64,
             avg_check Float64
         )
@@ -310,13 +327,13 @@ def main():
         "report_supplier_sales",
         """
         CREATE TABLE report_supplier_sales (
-            supplier_key UInt64,
+            supplier_key Int64,
             supplier_name Nullable(String),
             supplier_city Nullable(String),
             supplier_country Nullable(String),
-            products_count UInt64,
-            orders_count UInt64,
-            total_quantity UInt64,
+            products_count Int64,
+            orders_count Int64,
+            total_quantity Int64,
             total_sales_amount Float64
         )
         ENGINE = MergeTree
@@ -329,14 +346,14 @@ def main():
         "report_product_quality",
         """
         CREATE TABLE report_product_quality (
-            product_key UInt64,
+            product_key Int64,
             product_name Nullable(String),
             product_category Nullable(String),
             product_brand Nullable(String),
             avg_rating Nullable(Float64),
             avg_reviews Nullable(Float64),
-            orders_count UInt64,
-            total_quantity_sold UInt64,
+            orders_count Int64,
+            total_quantity_sold Int64,
             total_sales_amount Float64
         )
         ENGINE = MergeTree
