@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: bdspark_postgres
+    environment:
+      POSTGRES_DB: bigdata
+      POSTGRES_USER: bigdata
+      POSTGRES_PASSWORD: bigdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - "./исходные данные:/data:ro"
+      - "./init:/init:ro"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: bdspark_clickhouse
+    environment:
+      CLICKHOUSE_DB: bigdata
+      CLICKHOUSE_USER: bigdata
+      CLICKHOUSE_PASSWORD: bigdata
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  spark:
+    image: spark:3.5.4-python3
+    container_name: bdspark_spark
+    user: root
+    working_dir: /app
+    command: tail -f /dev/null
+    volumes:
+      - ./:/app
+    depends_on:
+      - postgres
+      - clickhouse
+
+volumes:
+  postgres_data:
+  clickhouse_data:
